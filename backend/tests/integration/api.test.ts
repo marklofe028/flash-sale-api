@@ -10,15 +10,14 @@ import supertest from 'supertest';
 import { buildServer } from '../../src/server';
 import { getRedisClient, initSale, disconnectRedis } from '../../src/services/redis';
 
-// Use DB 1 for tests
 process.env.REDIS_HOST = process.env.REDIS_HOST || 'localhost';
 
 let app: FastifyInstance;
 let redis: ReturnType<typeof getRedisClient>;
 
 const ACTIVE_SALE: Parameters<typeof initSale>[0] = {
-  startTime: new Date(Date.now() - 60_000).toISOString(),   // started 1 min ago
-  endTime: new Date(Date.now() + 3_600_000).toISOString(),  // ends in 1 hour
+  startTime: new Date(Date.now() - 60_000).toISOString(),
+  endTime: new Date(Date.now() + 3_600_000).toISOString(),
   totalStock: 10,
 };
 
@@ -29,9 +28,11 @@ async function resetSale(stock = 10): Promise<void> {
 
 beforeAll(async () => {
   app = await buildServer();
-  await app.ready();
+  // Bind to a real port (0 = OS picks a free one) so concurrent
+  // supertest connections don't ECONNRESET on the unbound socket
+  await app.listen({ port: 0, host: '127.0.0.1' });
   redis = getRedisClient();
-  await redis.select(1); // test DB
+  await redis.select(1);
 });
 
 afterAll(async () => {
@@ -117,22 +118,23 @@ describe('POST /sale/buy', () => {
   it('does not oversell: 20 concurrent buyers for 5 items', async () => {
     await resetSale(5);
 
-    const buyers = Array.from({ length: 20 }, (_, i) =>
-      supertest(app.server)
-        .post('/sale/buy')
-        .send({ userId: `concurrent-user-${i}` })
+    // Fire all 20 simultaneously against the bound port
+    const results = await Promise.all(
+      Array.from({ length: 20 }, (_, i) =>
+        supertest(app.server)
+          .post('/sale/buy')
+          .send({ userId: `concurrent-user-${i}` })
+      )
     );
 
-    const results = await Promise.all(buyers);
     const successes = results.filter((r) => r.status === 200);
-    const failures = results.filter((r) => r.status === 410);
+    const outOfStock = results.filter((r) => r.status === 410);
 
-    // Exactly 5 should succeed
+    // Exactly 5 should succeed — no more, no less
     expect(successes).toHaveLength(5);
-    // Remaining 15 should be out-of-stock
-    expect(failures).toHaveLength(15);
+    expect(outOfStock).toHaveLength(15);
 
-    // Verify Redis stock is exactly 0, not negative
+    // Ground truth: check Redis directly — must be 0, not negative
     const finalStock = await redis.get('sale:stock');
     expect(parseInt(finalStock!, 10)).toBe(0);
   });

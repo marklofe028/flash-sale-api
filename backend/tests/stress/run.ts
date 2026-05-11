@@ -10,6 +10,7 @@
  * Prerequisites: server running on localhost:3001, Redis up.
  */
 import autocannon from 'autocannon';
+import type { Client, Result } from 'autocannon';
 import http from 'http';
 
 const BASE_URL = process.env.API_URL || 'http://localhost:3001';
@@ -17,7 +18,6 @@ const CONNECTIONS = 1000;
 const DURATION_SECS = 15;
 const STOCK = parseInt(process.env.SALE_STOCK || '100', 10);
 
-// Helper: simple HTTP GET
 function get(path: string): Promise<{ status: number; body: unknown }> {
   return new Promise((resolve, reject) => {
     http.get(`${BASE_URL}${path}`, (res) => {
@@ -37,7 +37,6 @@ function get(path: string): Promise<{ status: number; body: unknown }> {
 async function main() {
   console.log('\n=== Flash Sale Stress Test ===\n');
 
-  // 1. Verify server is up
   const health = await get('/health');
   if (health.status !== 200) {
     console.error('Server is not running. Start it with: npm run dev');
@@ -45,7 +44,6 @@ async function main() {
   }
   console.log('✓ Server healthy\n');
 
-  // 2. Check current stock
   const statusRes = await get('/sale/status');
   const statusBody = statusRes.body as { status: string; remainingStock: number };
   console.log(`Sale status: ${statusBody.status}`);
@@ -54,31 +52,26 @@ async function main() {
     console.warn('\nWARNING: Sale is not active. Set SALE_START/SALE_END env vars.');
   }
 
-  // 3. Run the stress test
   console.log(`\nFiring ${CONNECTIONS} concurrent connections for ${DURATION_SECS}s...`);
   console.log('Each request uses a unique userId to simulate real buyers.\n');
 
   let requestCount = 0;
 
-  const result = await new Promise<autocannon.Result>((resolve) => {
-    const instance = autocannon({
-      url: `${BASE_URL}/sale/buy`,
-      connections: CONNECTIONS,
-      duration: DURATION_SECS,
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      setupClient(client) {
-        // Each virtual user gets a unique ID
-        const userId = `stress-user-${requestCount++}`;
-        client.setBody(JSON.stringify({ userId }));
-      },
-    });
+  // autocannon v7: use the promisify helper instead of new Promise + .on('done')
+  const run = autocannon.promisify(autocannon);
 
-    autocannon.track(instance, { renderProgressBar: true });
-    instance.on('done', resolve);
+  const result = await run({
+    url: `${BASE_URL}/sale/buy`,
+    connections: CONNECTIONS,
+    duration: DURATION_SECS,
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    setupClient(client) {
+      const userId = `stress-user-${requestCount++}`;
+      client.setBody(JSON.stringify({ userId }));
+    },
   });
 
-  // 4. Print summary
   console.log('\n=== Results ===\n');
   console.log(`Total requests:      ${result.requests.total}`);
   console.log(`Requests/sec (avg):  ${result.requests.mean.toFixed(0)}`);
@@ -89,19 +82,17 @@ async function main() {
   console.log(`Errors:              ${result.errors}`);
   console.log(`Timeouts:            ${result.timeouts}`);
 
-  // 5. Verify correctness — stock must not go below 0
   const finalStatus = await get('/sale/status');
   const finalBody = finalStatus.body as { remainingStock: number };
   console.log(`\nFinal remaining stock: ${finalBody.remainingStock}`);
 
   const successfulBuys = result['2xx'];
-  const expectedMax = STOCK;
 
   console.log('\n=== Correctness Check ===\n');
-  if (successfulBuys <= expectedMax) {
-    console.log(`✓ No overselling: ${successfulBuys} successful purchases ≤ ${expectedMax} stock`);
+  if (successfulBuys <= STOCK) {
+    console.log(`✓ No overselling: ${successfulBuys} successful purchases ≤ ${STOCK} stock`);
   } else {
-    console.error(`✗ OVERSELL DETECTED: ${successfulBuys} purchases exceeded ${expectedMax} stock`);
+    console.error(`✗ OVERSELL DETECTED: ${successfulBuys} purchases exceeded ${STOCK} stock`);
     process.exit(1);
   }
 
