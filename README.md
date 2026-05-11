@@ -95,6 +95,18 @@ I considered a Lua script to wrap both ops atomically but it felt like overkill 
 
 No SQL DB — stock is just an integer, purchase records are key-value. Redis is the right fit. If this were production I'd async-persist orders to Postgres for receipts/history, but that's a separate concern from the transaction itself.
 
+## Fault tolerance
+
+- Server won't start if Redis is unreachable — fails loudly on boot rather than silently mid-request
+- ioredis is configured with `maxRetriesPerRequest: 3` — transient network blips retry automatically
+- If Redis goes down mid-sale, all endpoints return 503 immediately
+- Graceful shutdown on SIGTERM/SIGINT — in-flight requests complete before the process exits
+- Redis runs with `appendonly yes` — stock and purchase state survive a container restart
+
+## Scalability
+
+The API is stateless — all shared state lives in Redis, so you can run multiple instances behind a load balancer without any coordination. Redis becomes the bottleneck at higher scale; mitigation is Redis Cluster for sharding (keeping `sale:stock` on one shard to preserve atomic DECR) and replica reads for status checks. `GET /sale/status` is also a good CDN caching candidate with a 1-2s TTL.
+
 ## Tests
 
 ```bash
